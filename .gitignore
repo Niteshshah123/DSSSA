@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pt
+*.pth
+*.dat
+*.npy
+*.mp4
+temp_uploads/
+.DS_Store
