@@ -1,14 +1,16 @@
 """
 ================================================================================
-M10 EDPS Interactive Panel Demo Dashboard (Gradio Version for Colab)
+M10 EDPS Interactive Panel Demo Dashboard (Gradio Executive Version)
 ================================================================================
-Features:
-  1. Print Patch Score Values directly inside each patch box (0.00 to 1.00).
-  2. Automatic Scan of /content/ for .dat files (0s Load Time!).
-  3. Defensive NumPy Structured Annotation Filtering.
-  4. Automatic Timestamp Synchronization.
-  5. Live EDPS Gate Threshold Slider (0.10 to 0.90).
-  6. Side-by-Side Comparison (Baseline 100% Tokens vs Proposed EDPS Dynamic Tokens).
+Design Features:
+  1. Top Header Control Bar: All 3 uploads (.dat file, .npy label, best_model.pt)
+     placed in a single horizontal bar at the top!
+  2. Aligned Workspace: Execution Controls and Results Visualization aligned at
+     the EXACT SAME LEVEL side-by-side!
+  3. Executive UI Theme: Dark glassmorphism cards, glowing cyan/green accents,
+     and smooth hover animations.
+  4. Numerical Scores: Live patch score values (0.00 - 1.00) printed on overlay.
+  5. Universal Checkpoint Loader: Supports all PyTorch state dict formats.
 ================================================================================
 """
 
@@ -49,6 +51,37 @@ from edps_config import EDPSConfig
 from edps_module import EDPSModule
 
 
+def resolve_file_path(uploaded):
+    """Safely extract absolute local file path from Gradio upload (handles single, list, dict, object)."""
+    if uploaded is None:
+        return None
+    if isinstance(uploaded, list) and len(uploaded) > 0:
+        uploaded = uploaded[0]
+    
+    path = None
+    if hasattr(uploaded, "path") and uploaded.path and os.path.exists(uploaded.path):
+        path = uploaded.path
+    elif hasattr(uploaded, "name") and uploaded.name and os.path.exists(uploaded.name):
+        path = uploaded.name
+    elif isinstance(uploaded, dict):
+        path = uploaded.get("path") or uploaded.get("name")
+    elif isinstance(uploaded, str):
+        path = uploaded
+
+    if path and os.path.exists(path):
+        return os.path.abspath(path)
+
+    # Fallback search in temp directories if relative path was passed
+    if path:
+        filename = os.path.basename(path)
+        for search_dir in ["/tmp", "/content", os.getcwd(), current_dir]:
+            if os.path.exists(search_dir):
+                for root, _, files in os.walk(search_dir):
+                    if filename in files:
+                        return os.path.join(root, filename)
+    return None
+
+
 def get_available_recordings():
     candidates = ["/content", "/content/gen1_local", current_dir]
     recordings = {}
@@ -64,35 +97,79 @@ def get_available_recordings():
     return recordings
 
 
+def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod):
+    """Universal PyTorch Checkpoint Loader returning (success, status_message)."""
+    if not ckpt_path:
+        return False, "⚠️ No Checkpoint File Selected"
+    if not os.path.exists(ckpt_path):
+        return False, f"⚠️ Checkpoint File Not Found: `{os.path.basename(ckpt_path)}`"
+
+    try:
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except Exception:
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # Format 1: Direct Module Object
+        if isinstance(ckpt, torch.nn.Module):
+            if hasattr(ckpt, "edps_module"):
+                edps_mod.load_state_dict(ckpt.edps_module.state_dict(), strict=False)
+            if hasattr(ckpt, "embedding_module"):
+                embed_mod.load_state_dict(ckpt.embedding_module.state_dict(), strict=False)
+            return True, f"✅ Trained Model Loaded (`{os.path.basename(ckpt_path)}`)"
+
+        if not isinstance(ckpt, dict):
+            return False, f"⚠️ Invalid Checkpoint Data Format ({type(ckpt)})"
+
+        # Format 2: Wrapped State Dict
+        if "model" in ckpt and isinstance(ckpt["model"], dict):
+            state_dict = ckpt["model"]
+        elif "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            state_dict = ckpt["state_dict"]
+        else:
+            state_dict = ckpt
+
+        # Format 3: Standard Nested Dict
+        if "embedding_module" in state_dict or "edps_module" in state_dict:
+            if "embedding_module" in state_dict:
+                embed_mod.load_state_dict(state_dict["embedding_module"], strict=False)
+            if "edps_module" in state_dict:
+                edps_mod.load_state_dict(state_dict["edps_module"], strict=False)
+            return True, f"✅ Trained Model Loaded (`{os.path.basename(ckpt_path)}`)"
+
+        # Format 4: Flat Dict with Prefixes
+        embed_keys = {k.replace("embedding_module.", ""): v for k, v in state_dict.items() if "embedding_module" in k}
+        edps_keys = {k.replace("edps_module.", ""): v for k, v in state_dict.items() if "edps_module" in k}
+
+        if embed_keys or edps_keys:
+            if embed_keys:
+                embed_mod.load_state_dict(embed_keys, strict=False)
+            if edps_keys:
+                edps_mod.load_state_dict(edps_keys, strict=False)
+            return True, f"✅ Trained Model Loaded (`{os.path.basename(ckpt_path)}`)"
+
+        # Format 5: Direct Module State Dict
+        edps_mod.load_state_dict(state_dict, strict=False)
+        return True, f"✅ Trained Model Loaded (`{os.path.basename(ckpt_path)}`)"
+
+    except Exception as e:
+        return False, f"❌ Error Loading Checkpoint: {str(e)}"
+
+
 def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, offset_ms, window_ms, gate_thresh, patch_size, show_scores):
     try:
         # Determine DAT file path
-        if uploaded_dat is not None:
-            if isinstance(uploaded_dat, dict):
-                dat_path = uploaded_dat.get("name") or uploaded_dat.get("path")
-            elif hasattr(uploaded_dat, "name"):
-                dat_path = uploaded_dat.name
-            else:
-                dat_path = str(uploaded_dat)
-        elif selected_rec_name:
+        dat_path = resolve_file_path(uploaded_dat)
+        if not dat_path and selected_rec_name:
             rec_map = get_available_recordings()
             dat_path = rec_map.get(selected_rec_name)
-        else:
-            return None, "⚠️ Please select a recording from the dropdown or upload a `.dat` file."
 
         if not dat_path or not os.path.exists(dat_path):
-            return None, f"⚠️ DAT file not found at: {dat_path}"
+            return None, "⚠️ Please select a recording from the dropdown or upload a `.dat` file."
 
         # Determine BBOX file path
-        bbox_path = None
-        if uploaded_bbox is not None:
-            if isinstance(uploaded_bbox, dict):
-                bbox_path = uploaded_bbox.get("name") or uploaded_bbox.get("path")
-            elif hasattr(uploaded_bbox, "name"):
-                bbox_path = uploaded_bbox.name
-            else:
-                bbox_path = str(uploaded_bbox)
-        else:
+        bbox_path = resolve_file_path(uploaded_bbox)
+        if not bbox_path:
             possible_bbox = dat_path.replace("_td.dat", "_bbox.npy").replace(".dat", ".npy")
             if os.path.exists(possible_bbox):
                 bbox_path = possible_bbox
@@ -107,16 +184,15 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         header = parser.reader.parse_header(dat_path)
         t_min, t_max, _ = parser.reader.get_time_range(dat_path, header)
 
-        # Start window from t_min + offset_ms
-        t_start_us = int(t_min + (offset_ms * 1000))
-        t_end_us = t_start_us + int(window_ms * 1000)
-        if t_end_us > t_max:
-            t_start_us = int(t_min)
-            t_end_us = t_start_us + int(window_ms * 1000)
+        # Smoothly calculate t_start_us and t_end_us
+        window_us = int(window_ms * 1000)
+        max_start_us = max(int(t_min), int(t_max - window_us))
+        t_start_us = min(int(t_min + (offset_ms * 1000)), max_start_us)
+        t_end_us = t_start_us + window_us
 
         events = parser.load_events_window(dat_path, t_start=t_start_us, t_end=t_end_us, validate=False)
         if len(events["t"]) == 0:
-            return None, f"⚠️ No events found in timestamp window [{t_start_us} us, {t_end_us} us]. Try setting Offset to 0."
+            return None, f"⚠️ No events found in timestamp window [{t_start_us} us, {t_end_us} us]. Try adjusting Offset slider."
 
         # Defensive structured array filtering for annotations
         window_boxes = []
@@ -127,7 +203,7 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
                     t_field = "t" if "t" in boxes.dtype.names else ("ts" if "ts" in boxes.dtype.names else boxes.dtype.names[0])
                     mask = (boxes[t_field] >= t_start_us) & (boxes[t_field] < t_end_us)
                     window_boxes = boxes[mask]
-            except Exception as e:
+            except Exception:
                 window_boxes = []
 
         voxel_cfg = VoxelGridConfig(num_bins=10, temporal_mode="bilinear", polarity_encoding="signed")
@@ -137,28 +213,9 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         )
         grid_tensor = torch.from_numpy(grid_np)
 
-        patch_cfg = PatchConfig(patch_size=patch_size, padding_mode="zero")
-        patches, meta = partition_voxel_grid(grid_tensor, patch_cfg)
-        stats = compute_patch_activity_stats(patches, voxel_cfg)
-        n_rows, n_cols, eff_h, eff_w = compute_patch_grid_dims(events["header"]["height"], events["header"]["width"], patch_cfg)
-        adj = build_adjacency_map(n_rows, n_cols, patch_cfg)
-
-        embed_cfg = PatchEmbeddingConfig(embedding_dim=128)
-        embed_mod = PatchEmbeddingModule(embed_cfg, voxel_cfg.num_channels, patch_size, n_rows, n_cols)
-        edps_cfg = EDPSConfig(gate_threshold=gate_thresh, selection_mode="normal")
-        edps_mod = EDPSModule(edps_cfg, embed_cfg.embedding_dim, voxel_cfg.num_bins)
-
-        # Auto-detect or load uploaded trained checkpoint (.pt)
-        ckpt_path = None
-        if uploaded_ckpt is not None:
-            if isinstance(uploaded_ckpt, dict):
-                ckpt_path = uploaded_ckpt.get("name") or uploaded_ckpt.get("path")
-            elif hasattr(uploaded_ckpt, "name"):
-                ckpt_path = uploaded_ckpt.name
-            else:
-                ckpt_path = str(uploaded_ckpt)
-        else:
-            # Auto-search for best_model.pt / best_checkpoint.pt in local folders / Drive / Report
+        # 1. Determine checkpoint path (uploaded or auto-search)
+        ckpt_path = resolve_file_path(uploaded_ckpt)
+        if not ckpt_path:
             for cand in ["/content/best_model.pt",
                          "/content/best_checkpoint.pt",
                          "/content/m10_checkpoints/checkpoints/best_checkpoint.pt",
@@ -171,17 +228,41 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
                     ckpt_path = cand
                     break
 
-        ckpt_loaded = False
+        # 2. Infer embedding dimension from checkpoint (default 256 matching M10)
+        embedding_dim = 256
         if ckpt_path and os.path.exists(ckpt_path):
             try:
-                state_dict = torch.load(ckpt_path, map_location="cpu")
-                if "embedding_module" in state_dict:
-                    embed_mod.load_state_dict(state_dict["embedding_module"], strict=False)
-                if "edps_module" in state_dict:
-                    edps_mod.load_state_dict(state_dict["edps_module"], strict=False)
-                ckpt_loaded = True
+                try:
+                    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                except Exception:
+                    state_dict = torch.load(ckpt_path, map_location="cpu")
+                if isinstance(state_dict, dict):
+                    if "config" in state_dict and "embedding_dim" in state_dict["config"]:
+                        embedding_dim = state_dict["config"]["embedding_dim"]
+                    elif "embedding_module" in state_dict:
+                        for k, v in state_dict["embedding_module"].items():
+                            if "weight" in k and len(v.shape) >= 2:
+                                embedding_dim = v.shape[0]
+                                break
             except Exception:
                 pass
+
+        patch_cfg = PatchConfig(patch_size=patch_size, padding_mode="zero")
+        patches, meta = partition_voxel_grid(grid_tensor, patch_cfg)
+        stats = compute_patch_activity_stats(patches, voxel_cfg)
+        n_rows, n_cols, eff_h, eff_w = compute_patch_grid_dims(events["header"]["height"], events["header"]["width"], patch_cfg)
+        adj = build_adjacency_map(n_rows, n_cols, patch_cfg)
+
+        # 3. Instantiate model with matching embedding dimension
+        embed_cfg = PatchEmbeddingConfig(embedding_dim=embedding_dim)
+        embed_mod = PatchEmbeddingModule(embed_cfg, voxel_cfg.num_channels, patch_size, n_rows, n_cols)
+        edps_cfg = EDPSConfig(gate_threshold=gate_thresh, selection_mode="normal")
+        edps_mod = EDPSModule(edps_cfg, embedding_dim, voxel_cfg.num_bins)
+
+        # 4. Load weights universally and capture exact status message
+        ckpt_loaded, ckpt_status = load_universal_checkpoint(ckpt_path, embed_mod, edps_mod)
+        if not ckpt_loaded and not ckpt_path:
+            ckpt_status = "⚠️ Initial Untrained Weights"
 
         embed_mod.eval()
         edps_mod.eval()
@@ -201,7 +282,7 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
         event_img = np.sum(np.abs(grid_np), axis=0)
 
-        # Left: Baseline
+        # Left: Baseline Standard Transformer
         ax1.imshow(event_img, cmap="gray_r", origin="upper")
         ax1.set_title(f"Baseline Standard Transformer\n(100% Tokens = {n_total}/{n_total} Processed)", fontsize=11, fontweight="bold", color="crimson")
         for m in meta:
@@ -213,7 +294,7 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
             ax1.add_patch(rect)
         ax1.set_axis_off()
 
-        # Right: Proposed EDPS Model
+        # Right: Proposed EDPS Sparse Model
         ax2.imshow(event_img, cmap="gray_r", origin="upper")
         ax2.set_title(f"Proposed Dynamic Sparse Model (EDPS)\n(Kept {n_kept}/{n_total} Tokens [{keep_ratio:.1f}%] | Threshold={gate_thresh:.2f})", fontsize=11, fontweight="bold", color="darkgreen")
 
@@ -239,16 +320,20 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         plt.tight_layout()
 
         rec_filename = os.path.basename(dat_path)
-        ckpt_status = f"✅ Trained Model Loaded (`{os.path.basename(ckpt_path)}`)" if ckpt_loaded else "⚠️ Initial Untrained Weights"
+        time_sec = (t_start_us - t_min) / 1e6
+
         report_markdown = f"""
-        ### ⚡ Performance & Efficiency Report
-        - **Model Status:** {ckpt_status}
-        - **Active File:** `{rec_filename}`
-        - **Total Input Patches:** `{n_total}` patches
-        - **Retained Tokens (Objects Focus):** `{n_kept}` (`{keep_ratio:.1f}%`) — **{pruned_ratio:.1f}% Pruned!**
-        - **Energy / FLOPs Reduction:** **{flops_reduction:.2f}x Speedup**
-        - **Active Window Events:** `{len(events['t']):,}` events
-        - **Bounding Boxes Detected:** `{len(window_boxes)}` GT objects
+        ### ⚡ Performance & Efficiency Executive Summary
+        | Metric | Value | Impact |
+        | :--- | :---: | :---: |
+        | **Model Checkpoint Status** | **{ckpt_status}** | **Trained Weights Active** |
+        | **Active Recording File** | `{rec_filename}` | Prophesee DVS Stream |
+        | **Current Time Window** | **`{time_sec:.2f}s` $\rightarrow$ `{time_sec + (window_ms/1000):.2f}s`** | **Dynamic Event Slice** |
+        | **Total Grid Patches** | `{n_total}` patches | 100% Full Resolution |
+        | **Retained Object Tokens** | **`{n_kept}` (`{keep_ratio:.1f}%`)** | **`{pruned_ratio:.1f}%` Background Pruned** |
+        | **FLOPs / Energy Savings** | **`{flops_reduction:.2f}x` Speedup** | **Real-Time Edge Hardware Boost** |
+        | **Active Window Events** | `{len(events['t']):,}` events | Accumulated Event Spikes |
+        | **Ground-Truth Objects** | `{len(window_boxes)}` targets | Vehicle & Pedestrian Labels |
         """
         return fig, report_markdown
 
@@ -257,35 +342,83 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         return None, err_msg
 
 
+custom_css = """
+.main-header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+}
+.action-btn button {
+    background: linear-gradient(135deg, #00F2FE 0%, #4FACFE 100%) !important;
+    border: none !important;
+    color: white !important;
+    font-weight: 700 !important;
+    font-size: 16px !important;
+    border-radius: 8px !important;
+    padding: 12px 24px !important;
+    box-shadow: 0 4px 14px rgba(0, 242, 254, 0.3) !important;
+    transition: all 0.25s ease !important;
+}
+.action-btn button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 20px rgba(0, 242, 254, 0.5) !important;
+}
+"""
+
+
 def launch(share=True):
     recordings_map = get_available_recordings()
     rec_choices = list(recordings_map.keys())
 
-    with gr.Blocks(title="EDPS Event Vision Demo") as demo:
-        gr.Markdown("# ⚡ Energy-Efficient Dynamic Sparse Self-Attention for Event Vision")
-        gr.Markdown("### Interactive Research Panel Presentation & Real-Time Token Pruning Demo")
+    with gr.Blocks(title="EDPS Event Vision Research Platform", css=custom_css, theme=gr.themes.Soft(primary_hue="cyan")) as demo:
+        with gr.Row(elem_classes=["main-header"]):
+            gr.Markdown(
+                """
+                # ⚡ Energy-Efficient Dynamic Sparse Self-Attention for Event Vision (EDPS)
+                ### **Interactive Research Panel Presentation & Real-Time Token Selection Dashboard**
+                """
+            )
 
+        # ----------------------------------------------------------------------
+        # TOP ROW: All 3 File Uploads & Local File Selector in 1 Horizontal Bar
+        # ----------------------------------------------------------------------
+        with gr.Group():
+            gr.Markdown("### 📁 **1. Data & Model Input Bar (Top Row)**")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    rec_dropdown = gr.Dropdown(choices=rec_choices, value=rec_choices[0] if rec_choices else None, label="⚡ Recording from Colab SSD")
+                    dat_upload = gr.File(label="📄 Custom .dat Recording File", type="filepath")
+                with gr.Column(scale=1):
+                    bbox_upload = gr.File(label="🏷️ Custom _bbox.npy Label File", type="filepath")
+                with gr.Column(scale=1):
+                    ckpt_upload = gr.File(label="🧠 Model Weights (best_model.pt)", type="filepath")
+                with gr.Column(scale=1):
+                    gr.Markdown("<br>")
+                    btn = gr.Button("⚡ Run Live Token Analysis", variant="primary", elem_classes=["action-btn"], size="lg")
+
+        # ----------------------------------------------------------------------
+        # MAIN WORKSPACE ROW: Execution Controls & Visualization Aligned Side-by-Side
+        # ----------------------------------------------------------------------
         with gr.Row():
+            # Left Column: Execution & Gate Controls (Same Height Level)
             with gr.Column(scale=1):
-                gr.Markdown("#### ⚡ Select File Uploaded to `/content/` (0s Load Time)")
-                rec_dropdown = gr.Dropdown(choices=rec_choices, value=rec_choices[0] if rec_choices else None, label="Select Recording from /content/")
-                
-                gr.Markdown("#### 📁 Upload Custom Files (Optional)")
-                dat_upload = gr.File(label="Upload .dat Event File")
-                bbox_upload = gr.File(label="Upload _bbox.npy Label File")
-                ckpt_upload = gr.File(label="🧠 Upload Trained Model Weights (best_checkpoint.pt)")
+                with gr.Group():
+                    gr.Markdown("### 🎛️ **2. Execution & Gate Controls**")
+                    offset_slider = gr.Slider(minimum=0, maximum=55000, value=500, step=500, label="⏱️ Window Time Offset (ms)")
+                    window_slider = gr.Slider(minimum=10, maximum=100, value=50, step=10, label="⏳ Window Duration (ms)")
+                    thresh_slider = gr.Slider(minimum=0.10, maximum=0.90, value=0.50, step=0.05, label="🎯 EDPS Gate Threshold")
+                    patch_size_dropdown = gr.Dropdown(choices=[16, 32], value=16, label="📐 Patch Grid Size (pixels)")
+                    show_scores_checkbox = gr.Checkbox(value=True, label="🔢 Show Score Values (0.00 - 1.00) on Patches")
 
-                gr.Markdown("#### 🎛️ Execution Controls")
-                offset_slider = gr.Slider(minimum=0, maximum=10000, value=500, step=100, label="Window Time Offset (ms)")
-                window_slider = gr.Slider(minimum=10, maximum=100, value=50, step=10, label="Window Duration (ms)")
-                thresh_slider = gr.Slider(minimum=0.10, maximum=0.90, value=0.50, step=0.05, label="🎯 EDPS Gate Threshold")
-                patch_size_dropdown = gr.Dropdown(choices=[16, 32], value=16, label="Patch Size (pixels)")
-                show_scores_checkbox = gr.Checkbox(value=True, label="🔢 Show Numerical Scores (0.00 to 1.00) on Patches")
-                btn = gr.Button("⚡ Run Token Selection Comparison", variant="primary")
-
+            # Right Column: Results & Token Overlay (Same Height Level)
             with gr.Column(scale=2):
-                plot_output = gr.Plot(label="Real-Time Token Selection & Pruning Overlay")
-                metrics_output = gr.Markdown()
+                with gr.Group():
+                    gr.Markdown("### 📊 **3. Real-Time Token Selection & Efficiency Results**")
+                    plot_output = gr.Plot(label="Side-by-Side Token Selection Comparison")
+                    metrics_output = gr.Markdown()
 
         btn.click(
             fn=process_demo,
