@@ -396,6 +396,16 @@ class Trainer:
             )
             self.history.append(summary)
 
+            val_map_str = f"{summary.val_map50:.4f}" if summary.val_map50 is not None else "N/A"
+            val_map95_str = f"{summary.val_map50_95:.4f}" if summary.val_map50_95 is not None else "N/A"
+            print("\n" + "=" * 70)
+            print(f"  EPOCH {self.state.epoch + 1}/{self.config.total_epochs} SUMMARY ({self.config.checkpoint_dir})")
+            print(f"  Train Loss : {summary.train_loss:.4f} (cls={summary.train_loss_components.get('cls', 0):.4f}, giou={summary.train_loss_components.get('giou', 0):.4f}, obj={summary.train_loss_components.get('objectness', 0):.4f})")
+            print(f"  Val mAP@50 : {val_map_str} | Val mAP@50:95: {val_map95_str}")
+            print(f"  Retained Tokens: {summary.avg_retained_tokens:.1f} tokens/sample")
+            print(f"  Learning Rate  : {summary.lr:.6f} | Epoch Time: {summary.epoch_time_s:.2f}s")
+            print("=" * 70 + "\n", flush=True)
+
             improved = False
             if val_result is not None and val_result["map_50"] is not None:
                 if val_result["map_50"] > self.state.best_metric + self.config.early_stopping_min_delta:
@@ -424,3 +434,79 @@ class Trainer:
             self.state.epoch += 1
 
         return self.history
+
+
+if __name__ == "__main__":
+    import argparse
+    from dataset_split import create_split, resolve_dataset_root
+    from gen1_dataset import EDPSGen1Dataset
+    from patch_embedding_config import PatchEmbeddingConfig
+    from patch_embedding_module import PatchEmbeddingModule
+    from edps_config import EDPSConfig
+    from edps_module import EDPSModule
+    from transformer_config import TransformerEncoderConfig
+    from transformer_encoder import TransformerEncoder
+    from detection_head_config import DetectionHeadConfig
+    from sparse_detection_head import SparseDetectionHead
+    from training_collate import build_training_dataloader
+
+    parser = argparse.ArgumentParser(description="M10 End-to-End Detector Trainer")
+    parser.add_argument("--dataset_root", type=str, default="/content/gen1_local", help="Path to Gen1 dataset root")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints")
+    parser.add_argument("--selection_mode", type=str, default="normal", choices=["normal", "baseline_no_pruning"])
+    parser.add_argument("--gate_threshold", type=float, default=0.5)
+    parser.add_argument("--total_epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--no_resume", action="store_true")
+    args = parser.parse_args()
+
+    actual_root = resolve_dataset_root(args.dataset_root)
+    manifest = create_split(actual_root)
+
+    num_bins = 10
+    height, width = 240, 304
+    patch_size = 16
+    embedding_dim = 256
+    n_rows, n_cols = height // patch_size, width // patch_size
+
+    train_ds = EDPSGen1Dataset(actual_root, manifest, split="train", drop_empty_windows=True)
+    val_ds = EDPSGen1Dataset(actual_root, manifest, split="val", drop_empty_windows=True) if len(manifest.val) > 0 else train_ds
+
+    config = TrainingConfig(
+        checkpoint_dir=args.checkpoint_dir,
+        total_epochs=args.total_epochs,
+        batch_size=args.batch_size,
+        base_lr=args.lr,
+    )
+
+    embed_cfg = PatchEmbeddingConfig(embedding_dim=embedding_dim)
+    embedding_module = PatchEmbeddingModule(embed_cfg, in_channels=num_bins, patch_size=patch_size, n_rows=n_rows, n_cols=n_cols, polarity_encoding="signed")
+
+    edps_cfg = EDPSConfig(gate_threshold=args.gate_threshold, selection_mode=args.selection_mode)
+    edps_module = EDPSModule(edps_cfg, embedding_dim=embedding_dim, num_bins=num_bins)
+
+    encoder_cfg = TransformerEncoderConfig(embedding_dim=embedding_dim, num_heads=4, num_layers=2)
+    encoder = TransformerEncoder(encoder_cfg)
+
+    head_cfg = DetectionHeadConfig(embedding_dim=embedding_dim, num_classes=2)
+    detection_head = SparseDetectionHead(head_cfg)
+
+    target_dev = "cuda" if (args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available())) else "cpu"
+
+    train_loader = build_training_dataloader(
+        train_ds, actual_root, n_rows, n_cols, embedding_module, edps_module, encoder, detection_head, config, is_train=True, device=target_dev
+    )
+    val_loader = build_training_dataloader(
+        val_ds, actual_root, n_rows, n_cols, embedding_module, edps_module, encoder, detection_head, config, is_train=False, device=target_dev
+    )
+
+    trainer = Trainer(
+        embedding_module=embedding_module, edps_module=edps_module, encoder=encoder, detection_head=detection_head,
+        train_loader=train_loader, val_loader=val_loader, config=config, num_classes=2, device=target_dev,
+    )
+
+    print(f"\n[Trainer] Starting training ({args.selection_mode}): epochs={args.total_epochs}, batch_size={args.batch_size}, device={target_dev}")
+    history = trainer.fit(resume=not args.no_resume)
+    print(f"[Trainer] Training completed! History recorded {len(history)} epochs.")

@@ -163,11 +163,17 @@ class EDPSGen1Dataset(Dataset):
         boxes = self._get_boxes(window.recording_stem)
         window_boxes = assign_boxes_to_window(boxes, window)
 
+        def _to_tensor(arr):
+            if torch.is_tensor(arr):
+                return arr[mask].clone() if torch.is_tensor(mask) else arr[mask.cpu() if torch.is_tensor(mask) else mask].clone()
+            arr_mask = mask.cpu().numpy() if torch.is_tensor(mask) else mask
+            return torch.from_numpy(np.asarray(arr)[arr_mask].copy())
+
         return {
-            "t": torch.from_numpy(t[mask].copy()),
-            "x": torch.from_numpy(x[mask].copy()),
-            "y": torch.from_numpy(y[mask].copy()),
-            "p": torch.from_numpy(p[mask].copy()),
+            "t": _to_tensor(t),
+            "x": _to_tensor(x),
+            "y": _to_tensor(y),
+            "p": _to_tensor(p),
             "boxes": window_boxes,
             "recording_stem": window.recording_stem,
             "window_index": window.window_index,
