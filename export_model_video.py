@@ -34,10 +34,22 @@ import numpy as np
 import cv2
 import torch
 
-# Ensure local project modules are importable
+# Ensure local project modules are importable (handles subfolders like /content/All Module)
 current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+search_dirs = [current_dir, "/content", "/content/All Module", "/content/All_Module", "/content/AllModule"]
+for candidate in search_dirs:
+    if os.path.exists(candidate) and candidate not in sys.path:
+        sys.path.insert(0, candidate)
+
+# Auto-scan any subfolders containing project modules
+if os.path.exists("/content"):
+    for root, dirs, files in os.walk("/content"):
+        if "patch_embedding.py" in files and root not in sys.path:
+            sys.path.insert(0, root)
+if os.path.exists(current_dir):
+    for root, dirs, files in os.walk(current_dir):
+        if "patch_embedding.py" in files and root not in sys.path:
+            sys.path.insert(0, root)
 
 from event_parser import EventParser
 from voxel_grid import VoxelGridConfig, events_to_voxel_grid
