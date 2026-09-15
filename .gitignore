@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
-*.pt
 *.pth
 *.dat
 *.npy
@@ -9,3 +8,4 @@ __pycache__/
 temp_uploads/
 .DS_Store
 .gradio/
+.ipynb_checkpoints/
