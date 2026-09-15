@@ -53,9 +53,18 @@ if os.path.exists(current_dir):
 
 from event_parser import EventParser
 from voxel_grid import VoxelGridConfig, events_to_voxel_grid
-from patch_embedding import PatchConfig, PatchEmbeddingConfig, PatchEmbeddingModule, partition_voxel_grid, compute_patch_activity_stats, compute_patch_grid_dims, build_adjacency_map
-from edps_module import EDPSConfig, EDPSModule, compute_gated_selected_embeddings, pad_token_sequences
-from transformer_encoder import TransformerEncoderConfig, TransformerEncoder
+from patch_config import PatchConfig
+from patch_partition import compute_patch_grid_dims, partition_voxel_grid
+from patch_statistics import compute_patch_activity_stats
+from patch_adjacency import build_adjacency_map
+from patch_embedding_config import PatchEmbeddingConfig
+from patch_embedding_module import PatchEmbeddingModule
+from edps_config import EDPSConfig
+from edps_module import EDPSModule
+from gated_token_wiring import compute_gated_selected_embeddings
+from token_padding import pad_token_sequences
+from transformer_config import TransformerEncoderConfig
+from transformer_encoder import TransformerEncoder
 from detection_head_config import DetectionHeadConfig
 from sparse_detection_head import SparseDetectionHead, decode_predictions
 
