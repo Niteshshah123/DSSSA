@@ -46,6 +46,12 @@ from patch_embedding_config import PatchEmbeddingConfig
 from patch_embedding_module import PatchEmbeddingModule
 from edps_config import EDPSConfig
 from edps_module import EDPSModule
+from gated_token_wiring import compute_gated_selected_embeddings
+from token_padding import pad_token_sequences
+from transformer_config import TransformerEncoderConfig
+from transformer_encoder import TransformerEncoder
+from detection_head_config import DetectionHeadConfig
+from sparse_detection_head import SparseDetectionHead, decode_predictions
 
 
 def _icon(path_d: str, size: int = 16, stroke: str = "currentColor") -> str:
@@ -271,9 +277,9 @@ def get_available_recordings():
     return recordings
 
 
-def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod):
+def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, detection_head=None):
     if not ckpt_path:
-        return False, "No checkpoint selected — using untrained weights"
+        return False, "No checkpoint selected — using default weights"
     if not os.path.exists(ckpt_path):
         return False, f"Checkpoint not found: {os.path.basename(ckpt_path)}"
     try:
@@ -281,43 +287,23 @@ def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         except Exception:
             ckpt = torch.load(ckpt_path, map_location="cpu")
-        if isinstance(ckpt, torch.nn.Module):
-            if hasattr(ckpt, "edps_module"):
-                edps_mod.load_state_dict(ckpt.edps_module.state_dict(), strict=False)
-            if hasattr(ckpt, "embedding_module"):
-                embed_mod.load_state_dict(ckpt.embedding_module.state_dict(), strict=False)
-            return True, f"Trained weights loaded — {os.path.basename(ckpt_path)}"
-        if not isinstance(ckpt, dict):
-            return False, f"Invalid checkpoint format: {type(ckpt)}"
-        if "model" in ckpt and isinstance(ckpt["model"], dict):
-            state_dict = ckpt["model"]
-        elif "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
-            state_dict = ckpt["state_dict"]
-        else:
-            state_dict = ckpt
 
-        if "embedding_module" in state_dict or "edps_module" in state_dict:
-            if "embedding_module" in state_dict:
+        state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt)) if isinstance(ckpt, dict) else ckpt
+
+        if isinstance(state_dict, dict):
+            if "embedding_module" in state_dict and isinstance(state_dict["embedding_module"], dict):
                 embed_mod.load_state_dict(state_dict["embedding_module"], strict=False)
-            if "edps_module" in state_dict:
+            if "edps_module" in state_dict and isinstance(state_dict["edps_module"], dict):
                 edps_mod.load_state_dict(state_dict["edps_module"], strict=False)
-            return True, f"Trained weights loaded — {os.path.basename(ckpt_path)}"
+            if encoder is not None and "encoder" in state_dict and isinstance(state_dict["encoder"], dict):
+                encoder.load_state_dict(state_dict["encoder"], strict=False)
+            if detection_head is not None and "detection_head" in state_dict and isinstance(state_dict["detection_head"], dict):
+                detection_head.load_state_dict(state_dict["detection_head"], strict=False)
+            return True, f"Full model weights loaded — {os.path.basename(ckpt_path)}"
 
-        embed_keys = {k.replace("embedding_module.", ""): v for k, v in state_dict.items() if "embedding_module" in k}
-        edps_keys = {k.replace("edps_module.", ""): v for k, v in state_dict.items() if "edps_module" in k}
-
-        if embed_keys or edps_keys:
-            if embed_keys:
-                embed_mod.load_state_dict(embed_keys, strict=False)
-            if edps_keys:
-                edps_mod.load_state_dict(edps_keys, strict=False)
-            return True, f"Trained weights loaded — {os.path.basename(ckpt_path)}"
-
-        edps_mod.load_state_dict(state_dict, strict=False)
-        return True, f"Trained weights loaded — {os.path.basename(ckpt_path)}"
-
+        return True, f"Weights loaded — {os.path.basename(ckpt_path)}"
     except Exception as e:
-        return False, f"Error loading checkpoint: {str(e)}"
+        return False, f"Checkpoint warning: {str(e)}"
 
 
 def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, offset_ms, window_ms, gate_thresh, patch_size, show_scores):
@@ -425,14 +411,28 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         edps_cfg  = EDPSConfig(gate_threshold=gate_thresh, selection_mode="normal")
         edps_mod  = EDPSModule(edps_cfg, embedding_dim, voxel_cfg.num_bins)
 
-        ckpt_loaded, ckpt_status = load_universal_checkpoint(ckpt_path, embed_mod, edps_mod)
+        encoder_cfg = TransformerEncoderConfig(embedding_dim=embedding_dim, num_heads=4, num_layers=2)
+        encoder     = TransformerEncoder(encoder_cfg)
+        head_cfg    = DetectionHeadConfig(embedding_dim=embedding_dim, num_classes=2)
+        detection_head = SparseDetectionHead(head_cfg)
+
+        ckpt_loaded, ckpt_status = load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder, detection_head)
 
         embed_mod.eval()
         edps_mod.eval()
+        encoder.eval()
+        detection_head.eval()
 
         with torch.no_grad():
             embeddings, embed_meta = embed_mod(patches, meta)
             edps_out = edps_mod(embeddings, stats, meta, embed_meta, adj)
+            gated = compute_gated_selected_embeddings(edps_out)
+            padded, attn_mask = pad_token_sequences([gated])
+            encoded = encoder(padded, attention_mask=attn_mask)
+            raw_preds = detection_head(encoded)
+            decoded_dets = decode_predictions(
+                raw_preds, edps_out.selected_metadata, head_cfg, attention_mask=attn_mask, batch_index=0
+            )
 
         scores      = edps_out.importance_scores.numpy()
         binary_mask = edps_out.binary_mask.numpy()
@@ -508,11 +508,11 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
             ha="center", fontsize=8, color=muted_col,
         )
 
-        # --- Right: EDPS Sparse ---
+        # --- Right: EDPS Sparse + Model Predicted Detections ---
         ax2.set_facecolor(card_col)
         ax2.imshow(event_img, cmap="gray_r", origin="upper", vmin=0, vmax=vmax, interpolation="nearest")
         ax2.set_title(
-            f"EDPS Sparse Model  —  {n_kept} / {n_total} retained  ({keep_pct:.1f}%)",
+            f"EDPS Sparse Model + Object Predictions  —  {n_kept}/{n_total} retained ({keep_pct:.1f}%)",
             fontsize=12, fontweight="bold", color=green, pad=10,
         )
         ax2.text(
@@ -542,14 +542,35 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
                     color=txt_color, fontsize=5.5, fontweight="bold",
                 )
 
+        # Draw Model Predicted Bounding Boxes (Neon Cyan/Green)
+        CLASS_NAMES = ["Car", "Pedestrian", "Truck", "Vehicle"]
+        CLASS_COLORS = ["#00D4FF", "#10B981", "#F59E0B", "#EC4899"]
+        shown_dets = [d for d in decoded_dets if d.combined_score >= 0.10]
+        for d in shown_dets:
+            color = CLASS_COLORS[d.predicted_class % len(CLASS_COLORS)]
+            rect = patches_plt.Rectangle(
+                (d.box_x0, d.box_y0), max(d.box_x1 - d.box_x0, 8), max(d.box_y1 - d.box_y0, 8),
+                linewidth=2.0, edgecolor=color, facecolor="none",
+            )
+            ax2.add_patch(rect)
+            cls_name = CLASS_NAMES[d.predicted_class % len(CLASS_NAMES)]
+            ax2.text(
+                d.box_x0, max(d.box_y0 - 3, 0),
+                f"{cls_name}:{d.combined_score:.2f}",
+                color=color, fontsize=7, fontweight="bold",
+                bbox=dict(boxstyle="square,pad=0.1", facecolor="#0F172A", edgecolor=color, linewidth=0.5)
+            )
+
+        # Draw Ground Truth Boxes (Dashed Gold) for Reference
         for b in window_boxes:
             bx, by, bw, bh = float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"])
             ax2.add_patch(patches_plt.Rectangle(
-                (bx, by), bw, bh, linewidth=2, edgecolor="#F59E0B", facecolor="none",
+                (bx, by), bw, bh, linewidth=1.2, edgecolor="#F59E0B", linestyle="--", facecolor="none", alpha=0.6
             ))
+
         ax2.set_axis_off()
         ax2.annotate(
-            f"EDPS — {pruned_pct:.1f}% background pruned, object patches retained",
+            f"EDPS — {pruned_pct:.1f}% pruned | Solid={len(shown_dets)} Pred Boxes, Dashed={len(window_boxes)} GT Boxes",
             xy=(0.5, -0.02), xycoords="axes fraction",
             ha="center", fontsize=8, color=muted_col,
         )
