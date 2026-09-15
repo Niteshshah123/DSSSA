@@ -195,19 +195,36 @@ def compare_checkpoints(baseline_ckpt, edps_ckpt, dat_path=None, gate_thresh=0.5
     b_map_str = f"{b_mAP:.4f}" if b_mAP is not None and b_mAP > 0 else "0.7620 (25 Epochs)"
     e_map_str = f"{e_mAP:.4f}" if e_mAP is not None and e_mAP > 0 else "0.7850 (25 Epochs)"
 
+    b_tokens_val = b_bench["avg_tokens"]
+    e_tokens_val = e_bench["avg_tokens"]
+    b_lat_val = b_bench["latency_ms"]
+    e_lat_val = e_bench["latency_ms"]
+    b_dets_val = b_bench["total_dets"]
+    e_dets_val = e_bench["total_dets"]
+
+    b_tokens_str = f"{b_tokens_val:.0f} / 285 (100.0%)"
+    e_tokens_str = f"{e_tokens_val:.0f} / 285 ({e_ret_pct:.1f}%)"
+    pruned_str = f"{pruned_pct:.1f}% Pruned"
+    flops_str = f"{flops_speedup:.2f}x Acceleration"
+    b_lat_str = f"{b_lat_val:.2f} ms"
+    e_lat_str = f"{e_lat_val:.2f} ms"
+    b_dets_str = f"{b_dets_val} objects"
+    e_dets_str = f"{e_dets_val} objects"
+    tau_str = f"tau = {gate_thresh:.2f}"
+
     print("\n" + "=" * 78)
     print("      📊 THESIS DEFENSE MODEL COMPARISON TABLE (BASELINE VS PROPOSED EDPS)      ")
     print("=" * 78)
     print(f"{'Performance Metric':<32} | {'Baseline Model (Dense)':<20} | {'Proposed EDPS Model (Sparse)':<20}")
     print("-" * 78)
     print(f"{'Token Selection Mode':<32} | {'Dense (100% Tokens)':<20} | {'Dynamic Sparse (EDPS)':<20}")
-    print(f"{'EDPS Gating Threshold (tau)':<32} | {'N/A (Disabled)':<20} | {f'tau = {gate_thresh:.2f}':<20}")
-    print(f"{'Average Retained Tokens':<32} | {f'{b_bench[\"avg_tokens\"]:.0f} / 285 (100.0%)':<20} | {f'{e_bench[\"avg_tokens\"]:.0f} / 285 ({e_ret_pct:.1f}%)':<20}")
-    print(f"{'Token Pruning Reduction':<32} | {'0.0% (Dense)':<20} | {f'{pruned_pct:.1f}% Pruned':<20}")
-    print(f"{'Attention FLOPs Speedup':<32} | {'1.00x Baseline':<20} | {f'{flops_speedup:.2f}x Acceleration':<20}")
-    print(f"{'Average Inference Latency':<32} | {f'{b_bench[\"latency_ms\"]:.2f} ms':<20} | {f'{e_bench[\"latency_ms\"]:.2f} ms':<20}")
+    print(f"{'EDPS Gating Threshold (tau)':<32} | {'N/A (Disabled)':<20} | {tau_str:<20}")
+    print(f"{'Average Retained Tokens':<32} | {b_tokens_str:<20} | {e_tokens_str:<20}")
+    print(f"{'Token Pruning Reduction':<32} | {'0.0% (Dense)':<20} | {pruned_str:<20}")
+    print(f"{'Attention FLOPs Speedup':<32} | {'1.00x Baseline':<20} | {flops_str:<20}")
+    print(f"{'Average Inference Latency':<32} | {b_lat_str:<20} | {e_lat_str:<20}")
     print(f"{'Object Detection mAP@50':<32} | {b_map_str:<20} | {e_map_str:<20}")
-    print(f"{'Detected Objects Count':<32} | {f'{b_bench[\"total_dets\"]} objects':<20} | {f'{e_bench[\"total_dets\"]} objects':<20}")
+    print(f"{'Detected Objects Count':<32} | {b_dets_str:<20} | {e_dets_str:<20}")
     print("=" * 78 + "\n")
 
 
