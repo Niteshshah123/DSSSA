@@ -57,7 +57,7 @@ from sparse_detection_head import SparseDetectionHead, decode_predictions
 
 def load_model_and_meta(ckpt_path, selection_mode="normal", gate_thresh=0.50, device="cpu"):
     embed_cfg = PatchEmbeddingConfig(embedding_dim=256)
-    embed_mod = PatchEmbeddingModule(embed_cfg, num_bins=10, patch_size=16, n_rows=15, n_cols=19).to(device)
+    embed_mod = PatchEmbeddingModule(embed_cfg, in_channels=10, patch_size=16, n_rows=15, n_cols=19).to(device)
 
     edps_cfg = EDPSConfig(gate_threshold=gate_thresh, selection_mode=selection_mode)
     edps_mod = EDPSModule(edps_cfg, embedding_dim=256, num_bins=10).to(device)
