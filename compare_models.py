@@ -94,8 +94,14 @@ def load_model_and_meta(ckpt_path, selection_mode="normal", gate_thresh=0.50, de
                     encoder.load_state_dict(state_dict["encoder"], strict=False)
                 if "detection_head" in state_dict and isinstance(state_dict["detection_head"], dict):
                     detection_head.load_state_dict(state_dict["detection_head"], strict=False)
+                print(f"✅ Successfully loaded checkpoint weights from: `{os.path.basename(ckpt_path)}`")
         except Exception as e:
-            print(f"⚠️ Error reading checkpoint '{ckpt_path}': {e}")
+            err_msg = str(e)
+            if "central directory" in err_msg or "zip archive" in err_msg:
+                print(f"⚠️ Truncated ZIP Checkpoint Error: `{os.path.basename(ckpt_path)}` (20.47 MB uploaded, but the last ~50KB zip footer index was cut off during upload/OneDrive sync).")
+                print("   👉 Solution: Re-upload the file to Colab or load directly from Google Drive.")
+            else:
+                print(f"⚠️ Error reading checkpoint '{ckpt_path}': {err_msg}")
 
     embed_mod.eval(); edps_mod.eval(); encoder.eval(); detection_head.eval()
     return embed_mod, edps_mod, encoder, detection_head, head_cfg, best_mAP, epochs_trained, config_dict
