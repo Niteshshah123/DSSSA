@@ -131,7 +131,7 @@ def get_available_recordings():
     return recordings
 
 
-def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, offset_ms, window_ms, gate_thresh, conf_thresh, patch_size, show_object_detection=True):
+def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, offset_ms, window_ms, gate_thresh, conf_thresh, patch_size, show_object_detection=True, show_patch_values=False):
     try:
         recordings = get_available_recordings()
         if not recordings:
@@ -287,6 +287,12 @@ def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, o
             else:
                 ax2.add_patch(patches_plt.Rectangle((m.x0, m.y0), patch_size, patch_size, linewidth=0.4, edgecolor=red, facecolor=red, alpha=0.06))
 
+            if show_patch_values and i < len(scores_e_np):
+                sc_val = float(scores_e_np[i])
+                txt_col = green if mask_e_np[i] else "#EF4444"
+                ax2.text(m.x0 + patch_size / 2.0, m.y0 + patch_size / 2.0, f"{sc_val:.2f}",
+                         color=txt_col, fontsize=5.5, ha="center", va="center", fontweight="bold", alpha=0.90 if mask_e_np[i] else 0.40)
+
         # EDPS Predicted Bounding Boxes (Review 3 Mode)
         shown_dets_e = [d for d in dets_e if d.combined_score >= conf_thresh]
         if show_object_detection:
@@ -368,6 +374,7 @@ def launch(share: bool = True):
                 conf_slider = gr.Slider(minimum=0.05, maximum=0.80, value=0.15, step=0.05, label="Detection Score Cutoff")
                 patch_size_dropdown = gr.Dropdown(choices=[16, 32], value=16, label="Patch Size (px)")
                 show_det_checkbox = gr.Checkbox(value=True, label="Enable Object Detection Bounding Boxes (Review 3 Mode)")
+                show_values_checkbox = gr.Checkbox(value=False, label="Show Numerical EDPS Gate Scores on Patches")
 
             with gr.Column(scale=9):
                 plot_out = gr.Plot(label="")
@@ -377,7 +384,7 @@ def launch(share: bool = True):
 
         run_btn.click(
             fn=run_dual_detection_demo,
-            inputs=[rec_dropdown, baseline_ckpt, edps_ckpt, offset_slider, window_slider, gate_slider, conf_slider, patch_size_dropdown, show_det_checkbox],
+            inputs=[rec_dropdown, baseline_ckpt, edps_ckpt, offset_slider, window_slider, gate_slider, conf_slider, patch_size_dropdown, show_det_checkbox, show_values_checkbox],
             outputs=[plot_out, kpi_out, status_out],
         )
 
