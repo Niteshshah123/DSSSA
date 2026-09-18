@@ -131,7 +131,7 @@ def get_available_recordings():
     return recordings
 
 
-def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, offset_ms, window_ms, gate_thresh, conf_thresh, patch_size):
+def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, offset_ms, window_ms, gate_thresh, conf_thresh, patch_size, show_object_detection=True):
     try:
         recordings = get_available_recordings()
         if not recordings:
@@ -257,18 +257,20 @@ def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, o
         for m in meta:
             ax1.add_patch(patches_plt.Rectangle((m.x0, m.y0), patch_size, patch_size, linewidth=0.4, edgecolor="#3B82F6", facecolor="none", alpha=0.3))
 
-        # Baseline Predicted Bounding Boxes
+        # Baseline Predicted Bounding Boxes (Review 3 Mode)
         shown_dets_b = [d for d in dets_b if d.combined_score >= conf_thresh]
-        for d in shown_dets_b:
-            color = CLASS_COLORS[d.predicted_class % len(CLASS_COLORS)]
-            w_box, h_box = max(d.box_x1 - d.box_x0, 10), max(d.box_y1 - d.box_y0, 10)
-            ax1.add_patch(patches_plt.Rectangle((d.box_x0, d.box_y0), w_box, h_box, linewidth=2.0, edgecolor=color, facecolor="none"))
-            cls_name = CLASS_NAMES[d.predicted_class % len(CLASS_NAMES)]
-            ax1.text(d.box_x0, max(d.box_y0 - 3, 0), f"{cls_name}:{d.combined_score:.2f}", color=color, fontsize=7, fontweight="bold",
-                     bbox=dict(boxstyle="square,pad=0.1", facecolor="#0F172A", edgecolor=color, linewidth=0.5))
+        if show_object_detection:
+            for d in shown_dets_b:
+                color = CLASS_COLORS[d.predicted_class % len(CLASS_COLORS)]
+                w_box, h_box = max(d.box_x1 - d.box_x0, 10), max(d.box_y1 - d.box_y0, 10)
+                ax1.add_patch(patches_plt.Rectangle((d.box_x0, d.box_y0), w_box, h_box, linewidth=2.0, edgecolor=color, facecolor="none"))
+                cls_name = CLASS_NAMES[d.predicted_class % len(CLASS_NAMES)]
+                ax1.text(d.box_x0, max(d.box_y0 - 3, 0), f"{cls_name}:{d.combined_score:.2f}", color=color, fontsize=7, fontweight="bold",
+                         bbox=dict(boxstyle="square,pad=0.1", facecolor="#0F172A", edgecolor=color, linewidth=0.5))
 
         ax1.set_axis_off()
-        ax1.annotate(f"Baseline Predictions: {len(shown_dets_b)} objects detected (Dense 285 tokens)", xy=(0.5, -0.02), xycoords="axes fraction", ha="center", fontsize=8, color=muted_col)
+        mode_str1 = f"Baseline Predictions: {len(shown_dets_b)} objects detected" if show_object_detection else "Review 2 Mode: Dense Token Selection Only"
+        ax1.annotate(f"{mode_str1} (100% Tokens)", xy=(0.5, -0.02), xycoords="axes fraction", ha="center", fontsize=8, color=muted_col)
 
         # --- RIGHT PANEL: Proposed EDPS Sparse Model ---
         ax2.set_facecolor(card_col)
@@ -285,23 +287,25 @@ def run_dual_detection_demo(selected_rec_name, baseline_ckpt_up, edps_ckpt_up, o
             else:
                 ax2.add_patch(patches_plt.Rectangle((m.x0, m.y0), patch_size, patch_size, linewidth=0.4, edgecolor=red, facecolor=red, alpha=0.06))
 
-        # EDPS Predicted Bounding Boxes
+        # EDPS Predicted Bounding Boxes (Review 3 Mode)
         shown_dets_e = [d for d in dets_e if d.combined_score >= conf_thresh]
-        for d in shown_dets_e:
-            color = CLASS_COLORS[d.predicted_class % len(CLASS_COLORS)]
-            w_box, h_box = max(d.box_x1 - d.box_x0, 10), max(d.box_y1 - d.box_y0, 10)
-            ax2.add_patch(patches_plt.Rectangle((d.box_x0, d.box_y0), w_box, h_box, linewidth=2.2, edgecolor=color, facecolor="none"))
-            cls_name = CLASS_NAMES[d.predicted_class % len(CLASS_NAMES)]
-            ax2.text(d.box_x0, max(d.box_y0 - 3, 0), f"{cls_name}:{d.combined_score:.2f} (EDPS)", color=color, fontsize=7, fontweight="bold",
-                     bbox=dict(boxstyle="square,pad=0.1", facecolor="#0F172A", edgecolor=color, linewidth=0.5))
+        if show_object_detection:
+            for d in shown_dets_e:
+                color = CLASS_COLORS[d.predicted_class % len(CLASS_COLORS)]
+                w_box, h_box = max(d.box_x1 - d.box_x0, 10), max(d.box_y1 - d.box_y0, 10)
+                ax2.add_patch(patches_plt.Rectangle((d.box_x0, d.box_y0), w_box, h_box, linewidth=2.2, edgecolor=color, facecolor="none"))
+                cls_name = CLASS_NAMES[d.predicted_class % len(CLASS_NAMES)]
+                ax2.text(d.box_x0, max(d.box_y0 - 3, 0), f"{cls_name}:{d.combined_score:.2f} (EDPS)", color=color, fontsize=7, fontweight="bold",
+                         bbox=dict(boxstyle="square,pad=0.1", facecolor="#0F172A", edgecolor=color, linewidth=0.5))
 
-        # Ground Truth Dashed Gold Boxes (Reference)
-        for b in window_boxes:
-            bx, by, bw, bh = float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"])
-            ax2.add_patch(patches_plt.Rectangle((bx, by), bw, bh, linewidth=1.2, edgecolor="#F59E0B", linestyle="--", facecolor="none", alpha=0.5))
+            # Ground Truth Dashed Gold Boxes (Reference)
+            for b in window_boxes:
+                bx, by, bw, bh = float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"])
+                ax2.add_patch(patches_plt.Rectangle((bx, by), bw, bh, linewidth=1.2, edgecolor="#F59E0B", linestyle="--", facecolor="none", alpha=0.5))
 
         ax2.set_axis_off()
-        ax2.annotate(f"EDPS Predictions: {len(shown_dets_e)} objects detected | {pruned_pct:.1f}% Tokens Pruned | Dashed=GT", xy=(0.5, -0.02), xycoords="axes fraction", ha="center", fontsize=8, color=muted_col)
+        mode_str2 = f"EDPS Predictions: {len(shown_dets_e)} objects detected" if show_object_detection else "Review 2 Mode: Dynamic Token Selection Only"
+        ax2.annotate(f"{mode_str2} | {pruned_pct:.1f}% Tokens Pruned", xy=(0.5, -0.02), xycoords="axes fraction", ha="center", fontsize=8, color=muted_col)
 
         plt.tight_layout(pad=2.0)
 
@@ -363,6 +367,7 @@ def launch(share: bool = True):
                 gate_slider = gr.Slider(minimum=0.10, maximum=0.90, value=0.50, step=0.05, label="EDPS Gate Threshold (tau)")
                 conf_slider = gr.Slider(minimum=0.05, maximum=0.80, value=0.15, step=0.05, label="Detection Score Cutoff")
                 patch_size_dropdown = gr.Dropdown(choices=[16, 32], value=16, label="Patch Size (px)")
+                show_det_checkbox = gr.Checkbox(value=True, label="Enable Object Detection Bounding Boxes (Review 3 Mode)")
 
             with gr.Column(scale=9):
                 plot_out = gr.Plot(label="")
@@ -372,7 +377,7 @@ def launch(share: bool = True):
 
         run_btn.click(
             fn=run_dual_detection_demo,
-            inputs=[rec_dropdown, baseline_ckpt, edps_ckpt, offset_slider, window_slider, gate_slider, conf_slider, patch_size_dropdown],
+            inputs=[rec_dropdown, baseline_ckpt, edps_ckpt, offset_slider, window_slider, gate_slider, conf_slider, patch_size_dropdown, show_det_checkbox],
             outputs=[plot_out, kpi_out, status_out],
         )
 
