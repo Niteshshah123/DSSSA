@@ -25,13 +25,13 @@ from pathlib import Path
 from collections import defaultdict
 
 # ------------------------------------------------------------------------------
-# 1. PATH & EVALUATION CONFIGURATION
+# 1. PATH & EVALUATION CONFIGURATION (CPU OPTIMIZED)
 # ------------------------------------------------------------------------------
 DATASET_PATH = "/content/17-10-18_18-24-24_61500000_121500000_td.dat"
 MODEL_PATH   = "/content/DSSSA/checkpoints_edps_proposed/best_model.pt"
 
 WINDOW_MS    = 50.0   # Temporal slice duration in ms (standard 50ms for Gen1)
-MAX_WINDOWS  = 100    # Set to an integer (e.g. 100) for fast eval, or None for entire recording
+MAX_WINDOWS  = 30     # 30 windows gives fast CPU evaluation (~15s) with high statistical confidence
 SCORE_THRESH = 0.30   # Operating point confidence threshold for Precision/Recall/F1
 IOU_THRESH   = 0.50   # IoU matching threshold for Detection TP/FP
 GATE_THRESH  = 0.50   # EDPS dynamic token selection gate threshold
@@ -45,6 +45,10 @@ for path_cand in ["/content/DSSSA", "/content", os.getcwd()]:
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Maximize CPU parallelism
+if hasattr(torch, "set_num_threads"):
+    torch.set_num_threads(os.cpu_count() or 4)
 
 # Safe globals allowlisting for PyTorch 2.6 serialization
 try:
@@ -60,6 +64,57 @@ try:
             torch.serialization.add_safe_globals(_safe)
 except Exception:
     pass
+
+def ensure_real_checkpoint(model_path: str) -> str:
+    """
+    Detects if the checkpoint file is a Git LFS text pointer (which causes
+    'UnpicklingError: invalid load key, v') and pulls the real binary weights.
+    """
+    if not os.path.exists(model_path):
+        return model_path
+
+    # A real PyTorch model is megabytes; a Git LFS pointer is ~130 bytes
+    size = os.path.getsize(model_path)
+    with open(model_path, "rb") as f:
+        head = f.read(30)
+
+    if head.startswith(b"version https://git-lfs") or size < 1024:
+        print(f"[!] Warning: '{model_path}' is a Git LFS text pointer ({size} bytes), not the binary model.")
+        print("[*] Automatically executing 'git lfs pull' in /content/DSSSA ...")
+        import subprocess
+        repo_dir = "/content/DSSSA" if os.path.exists("/content/DSSSA") else os.path.dirname(model_path)
+        try:
+            subprocess.run(["git", "lfs", "install"], cwd=repo_dir, capture_output=True)
+            res = subprocess.run(["git", "lfs", "pull"], cwd=repo_dir, capture_output=True, text=True)
+            if res.stdout:
+                print(f"    {res.stdout.strip()}")
+        except Exception as e:
+            print(f"    Git LFS pull attempt: {e}")
+
+        # Check if resolved
+        if os.path.getsize(model_path) > 1024:
+            print(f"[+] Successfully fetched binary weights ({os.path.getsize(model_path)/(1024*1024):.2f} MB)")
+            return model_path
+
+        # Fallback: search /content for any uploaded binary .pt file
+        print("[*] Searching /content for any uploaded binary .pt checkpoint ...")
+        for root, _, files in os.walk("/content"):
+            for f in files:
+                if f.endswith(".pt") or f.endswith(".pth"):
+                    cand = os.path.join(root, f)
+                    if os.path.getsize(cand) > 1024 * 1024:  # > 1 MB
+                        print(f"[+] Found valid binary model: {cand} ({os.path.getsize(cand)/(1024*1024):.2f} MB)")
+                        return cand
+
+        raise RuntimeError(
+            f"The checkpoint at {model_path} is an un-downloaded Git LFS pointer ({size} bytes).\n"
+            f"Run this in a separate Colab cell to pull all weights:\n"
+            f"  !cd /content/DSSSA && git lfs install && git lfs pull\n"
+            f"Or upload your 'best_model.pt' directly to /content/best_model.pt"
+        )
+
+    return model_path
+
 
 # DSSSA Framework Imports
 from event_parser import EventParser
@@ -301,6 +356,7 @@ def run_paper_evaluation():
     total_patches_full = n_rows * n_cols
 
     # 3. Load Checkpoint Safely
+    actual_model = ensure_real_checkpoint(actual_model)
     print(f"[*] Loading model checkpoint: {actual_model} ...")
     try:
         ckpt = torch.load(actual_model, map_location="cpu", weights_only=False)
