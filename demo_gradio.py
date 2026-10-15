@@ -283,7 +283,18 @@ def get_available_recordings():
 
 
 def get_available_checkpoints():
-    candidates = ["/content", "/content/drive/MyDrive", "/content/m10_checkpoints", current_dir, os.getcwd()]
+    candidates = [
+        "/content",
+        "/content/DSSSA",
+        "/content/DSSSA/checkpoints_baseline",
+        "/content/checkpoints_baseline",
+        "/content/drive/MyDrive",
+        "/content/m10_checkpoints",
+        current_dir,
+        os.path.join(current_dir, "checkpoints_baseline"),
+        os.getcwd(),
+        os.path.join(os.getcwd(), "checkpoints_baseline"),
+    ]
     checkpoints = {}
     for candidate in candidates:
         if os.path.exists(candidate):
@@ -823,8 +834,17 @@ def launch(share: bool = True):
     rec_choices     = list(recordings_map.keys())
 
     checkpoints_map = get_available_checkpoints()
-    ckpt_choices    = list(checkpoints_map.keys())
-    default_ckpt    = None
+    import re
+    def ckpt_sort_key(name):
+        if "best" in name.lower():
+            return (0, 0)
+        nums = re.findall(r'\d+', name)
+        if nums:
+            return (1, -int(nums[0]))
+        return (2, name)
+
+    ckpt_choices = sorted(list(checkpoints_map.keys()), key=ckpt_sort_key)
+    default_ckpt = None
     for priority in ["checkpoint_epoch_20.pt", "best_model.pt", "best_checkpoint.pt"]:
         if priority in ckpt_choices:
             default_ckpt = priority
