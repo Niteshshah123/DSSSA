@@ -65,55 +65,91 @@ try:
 except Exception:
     pass
 
-def ensure_real_checkpoint(model_path: str) -> str:
+def find_valid_checkpoint(preferred_paths) -> str:
     """
-    Detects if the checkpoint file is a Git LFS text pointer (which causes
-    'UnpicklingError: invalid load key, v') and pulls the real binary weights.
+    Robustly finds, verifies, and unpacks a PyTorch checkpoint:
+    1. Validates zip archive integrity using `zipfile.is_zipfile` to avoid corrupt files.
+    2. Detects Git LFS text pointers and attempts to run `git lfs pull`.
+    3. Auto-searches /content and Google Drive for any intact .pt file.
+    4. If none exists, provides a 1-click interactive Colab upload dialog.
     """
-    if not os.path.exists(model_path):
-        return model_path
+    import zipfile
 
-    # A real PyTorch model is megabytes; a Git LFS pointer is ~130 bytes
-    size = os.path.getsize(model_path)
-    with open(model_path, "rb") as f:
-        head = f.read(30)
+    if isinstance(preferred_paths, str):
+        preferred_paths = [preferred_paths]
 
-    if head.startswith(b"version https://git-lfs") or size < 1024:
-        print(f"[!] Warning: '{model_path}' is a Git LFS text pointer ({size} bytes), not the binary model.")
-        print("[*] Automatically executing 'git lfs pull' in /content/DSSSA ...")
-        import subprocess
-        repo_dir = "/content/DSSSA" if os.path.exists("/content/DSSSA") else os.path.dirname(model_path)
+    candidates = list(preferred_paths)
+    for search_dir in ["/content", "/content/DSSSA", "/content/drive/MyDrive"]:
+        if os.path.exists(search_dir):
+            for root, _, files in os.walk(search_dir):
+                if ".git" in root or "__pycache__" in root:
+                    continue
+                for f in files:
+                    if f.endswith(".pt") or f.endswith(".pth"):
+                        candidates.append(os.path.join(root, f))
+
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        if c and os.path.exists(c) and c not in seen:
+            seen.add(c)
+            unique_candidates.append(c)
+
+    # Check candidates for valid uncorrupted PyTorch zip archive
+    for cand in unique_candidates:
+        size_bytes = os.path.getsize(cand)
+        size_mb = size_bytes / (1024 * 1024)
+        if size_bytes < 1024:
+            continue  # Git LFS pointer
         try:
-            subprocess.run(["git", "lfs", "install"], cwd=repo_dir, capture_output=True)
-            res = subprocess.run(["git", "lfs", "pull"], cwd=repo_dir, capture_output=True, text=True)
-            if res.stdout:
-                print(f"    {res.stdout.strip()}")
-        except Exception as e:
-            print(f"    Git LFS pull attempt: {e}")
+            if zipfile.is_zipfile(cand):
+                print(f"[+] Found intact, valid PyTorch model: {cand} ({size_mb:.2f} MB)")
+                return cand
+            else:
+                print(f"[!] Warning: '{os.path.basename(cand)}' ({size_mb:.2f} MB) is corrupted/incomplete (failed zip header check).")
+        except Exception:
+            pass
 
-        # Check if resolved
-        if os.path.getsize(model_path) > 1024:
-            print(f"[+] Successfully fetched binary weights ({os.path.getsize(model_path)/(1024*1024):.2f} MB)")
-            return model_path
+    # Try Git LFS pull if in a git repo
+    print("[*] Attempting to pull binary weights via 'git lfs pull' in /content/DSSSA ...")
+    repo_dir = "/content/DSSSA" if os.path.exists("/content/DSSSA") else os.getcwd()
+    try:
+        import subprocess
+        subprocess.run(["git", "lfs", "install"], cwd=repo_dir, capture_output=True)
+        res = subprocess.run(["git", "lfs", "pull"], cwd=repo_dir, capture_output=True, text=True)
+        for cand in unique_candidates:
+            if os.path.exists(cand) and zipfile.is_zipfile(cand):
+                print(f"[+] Successfully fetched via Git LFS: {cand}")
+                return cand
+    except Exception as e:
+        print(f"    Git LFS attempt: {e}")
 
-        # Fallback: search /content for any uploaded binary .pt file
-        print("[*] Searching /content for any uploaded binary .pt checkpoint ...")
-        for root, _, files in os.walk("/content"):
-            for f in files:
-                if f.endswith(".pt") or f.endswith(".pth"):
-                    cand = os.path.join(root, f)
-                    if os.path.getsize(cand) > 1024 * 1024:  # > 1 MB
-                        print(f"[+] Found valid binary model: {cand} ({os.path.getsize(cand)/(1024*1024):.2f} MB)")
-                        return cand
+    # Interactive upload fallback in Colab
+    print("\n" + "=" * 80)
+    print("  ACTION REQUIRED: UPLOAD INTACT 'best_model.pt' (20.4 MB)")
+    print("=" * 80)
+    print("The files on disk are either Git LFS pointers (133 bytes) or incomplete uploads.")
+    print("Opening Google Colab file upload dialog now...")
+    try:
+        from google.colab import files
+        uploaded = files.upload()
+        for fname in uploaded.keys():
+            if fname.endswith(".pt") or fname.endswith(".pth"):
+                up_path = os.path.abspath(fname)
+                if zipfile.is_zipfile(up_path):
+                    print(f"[+] Successfully uploaded intact model: {up_path} ({os.path.getsize(up_path)/(1024*1024):.2f} MB)")
+                    return up_path
+                else:
+                    print(f"[!] Uploaded file '{fname}' failed zip verification.")
+    except Exception as e:
+        print(f"Interactive upload dialog error: {e}")
 
-        raise RuntimeError(
-            f"The checkpoint at {model_path} is an un-downloaded Git LFS pointer ({size} bytes).\n"
-            f"Run this in a separate Colab cell to pull all weights:\n"
-            f"  !cd /content/DSSSA && git lfs install && git lfs pull\n"
-            f"Or upload your 'best_model.pt' directly to /content/best_model.pt"
-        )
+    raise RuntimeError(
+        "No intact PyTorch checkpoint found.\n"
+        "Please drag and drop 'best_model.pt' (20.4 MB) from your local computer into the Colab file tree on the left,\n"
+        "wait until the upload circle completes 100%, and re-run."
+    )
 
-    return model_path
 
 
 # DSSSA Framework Imports
@@ -356,7 +392,7 @@ def run_paper_evaluation():
     total_patches_full = n_rows * n_cols
 
     # 3. Load Checkpoint Safely
-    actual_model = ensure_real_checkpoint(actual_model)
+    actual_model = find_valid_checkpoint(actual_model)
     print(f"[*] Loading model checkpoint: {actual_model} ...")
     try:
         ckpt = torch.load(actual_model, map_location="cpu", weights_only=False)
