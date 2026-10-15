@@ -287,13 +287,17 @@ def get_available_checkpoints():
         "/content",
         "/content/DSSSA",
         "/content/DSSSA/checkpoints_baseline",
+        "/content/DSSSA/checkpoints_edps_proposed",
         "/content/checkpoints_baseline",
+        "/content/checkpoints_edps_proposed",
         "/content/drive/MyDrive",
         "/content/m10_checkpoints",
         current_dir,
         os.path.join(current_dir, "checkpoints_baseline"),
+        os.path.join(current_dir, "checkpoints_edps_proposed"),
         os.getcwd(),
         os.path.join(os.getcwd(), "checkpoints_baseline"),
+        os.path.join(os.getcwd(), "checkpoints_edps_proposed"),
     ]
     checkpoints = {}
     for candidate in candidates:
@@ -304,10 +308,34 @@ def get_available_checkpoints():
                 for f in files:
                     if f.endswith(".pt") or f.endswith(".pth") or f.endswith(".ckpt"):
                         full_path = os.path.join(root, f)
-                        display_name = f
+                        parent = os.path.basename(root)
+                        if "edps" in parent.lower() or "proposed" in parent.lower():
+                            prefix = "[Proposed EDPS]"
+                        elif "baseline" in parent.lower():
+                            prefix = "[Baseline]"
+                        else:
+                            prefix = f"[{parent}]" if parent and parent not in ["content", "DSSSA", "."] else ""
+
+                        display_name = f"{prefix} {f}".strip() if prefix else f
                         if display_name not in checkpoints:
                             checkpoints[display_name] = full_path
     return checkpoints
+
+
+try:
+    import numpy as _np
+    if hasattr(torch.serialization, "add_safe_globals"):
+        _safe = []
+        if hasattr(_np, "_core") and hasattr(_np._core, "multiarray") and hasattr(_np._core.multiarray, "_reconstruct"):
+            _safe.append(_np._core.multiarray._reconstruct)
+        if hasattr(_np, "ndarray"):
+            _safe.append(_np.ndarray)
+        if hasattr(_np, "dtype"):
+            _safe.append(_np.dtype)
+        if _safe:
+            torch.serialization.add_safe_globals(_safe)
+except Exception:
+    pass
 
 
 def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, detection_head=None):
@@ -318,7 +346,7 @@ def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, dete
     try:
         try:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        except Exception:
+        except TypeError:
             ckpt = torch.load(ckpt_path, map_location="cpu")
 
         # Format 1: Direct Module Object
@@ -376,7 +404,49 @@ def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, dete
         return False, f"Checkpoint warning: {str(e)}"
 
 
-def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, selected_ckpt_name, uploaded_ckpt, offset_ms, window_ms, gate_thresh, patch_size, show_scores):
+def apply_nms(detections, iou_threshold=0.35, conf_threshold=0.30):
+    """
+    Applies standard Non-Maximum Suppression (NMS) to merge multiple
+    patch-level predictions into single physical object detections.
+    """
+    valid = [d for d in detections if d.combined_score >= conf_threshold]
+    if not valid:
+        return []
+
+    valid.sort(key=lambda x: x.combined_score, reverse=True)
+    kept = []
+
+    while valid:
+        best = valid.pop(0)
+        kept.append(best)
+
+        remaining = []
+        for other in valid:
+            if other.predicted_class == best.predicted_class:
+                xx0 = max(best.box_x0, other.box_x0)
+                yy0 = max(best.box_y0, other.box_y0)
+                xx1 = min(best.box_x1, other.box_x1)
+                yy1 = min(best.box_y1, other.box_y1)
+
+                w = max(0.0, xx1 - xx0)
+                h = max(0.0, yy1 - yy0)
+                inter = w * h
+
+                area_best = max(0.0, best.box_x1 - best.box_x0) * max(0.0, best.box_y1 - best.box_y0)
+                area_other = max(0.0, other.box_x1 - other.box_x0) * max(0.0, other.box_y1 - other.box_y0)
+                union = area_best + area_other - inter
+
+                iou = (inter / union) if union > 0 else 0.0
+                if iou < iou_threshold:
+                    remaining.append(other)
+            else:
+                remaining.append(other)
+        valid = remaining
+
+    return kept
+
+
+def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, selected_ckpt_name, uploaded_ckpt, offset_ms, window_ms, gate_thresh, det_conf, patch_size, show_scores):
     try:
         dat_path = resolve_file_path(uploaded_dat)
         if not dat_path and selected_rec_name:
@@ -463,7 +533,7 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, selected_ckpt_n
             try:
                 try:
                     sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-                except Exception:
+                except TypeError:
                     sd = torch.load(ckpt_path, map_location="cpu")
                 if isinstance(sd, dict):
                     if "config" in sd and "embedding_dim" in sd["config"]:
@@ -620,23 +690,25 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, selected_ckpt_n
                     color=txt_color, fontsize=5.5, fontweight="bold",
                 )
 
-        # Draw Model Predicted Bounding Boxes (Neon Cyan/Green)
+        # Draw Model Predicted Bounding Boxes with NMS (Neon Cyan/Green)
         CLASS_NAMES = ["Car", "Pedestrian", "Truck", "Vehicle"]
         CLASS_COLORS = ["#00D4FF", "#10B981", "#F59E0B", "#EC4899"]
-        shown_dets = [d for d in decoded_dets if d.combined_score >= 0.10]
+        shown_dets = apply_nms(decoded_dets, iou_threshold=0.35, conf_threshold=det_conf)
         for d in shown_dets:
             color = CLASS_COLORS[d.predicted_class % len(CLASS_COLORS)]
+            bw = max(d.box_x1 - d.box_x0, 16)
+            bh = max(d.box_y1 - d.box_y0, 16)
             rect = patches_plt.Rectangle(
-                (d.box_x0, d.box_y0), max(d.box_x1 - d.box_x0, 8), max(d.box_y1 - d.box_y0, 8),
-                linewidth=2.0, edgecolor=color, facecolor="none",
+                (d.box_x0, d.box_y0), bw, bh,
+                linewidth=2.2, edgecolor=color, facecolor="none",
             )
             ax2.add_patch(rect)
             cls_name = CLASS_NAMES[d.predicted_class % len(CLASS_NAMES)]
             ax2.text(
-                d.box_x0, max(d.box_y0 - 3, 0),
-                f"{cls_name}:{d.combined_score:.2f}",
-                color=color, fontsize=7, fontweight="bold",
-                bbox=dict(boxstyle="square,pad=0.1", facecolor="#0F172A", edgecolor=color, linewidth=0.5)
+                d.box_x0, max(d.box_y0 - 4, 0),
+                f"{cls_name}: {d.combined_score:.2f}",
+                color=color, fontsize=8, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="#0F172A", edgecolor=color, linewidth=0.8, alpha=0.9)
             )
 
         # Draw Ground Truth Boxes (Dashed Gold) for Reference
@@ -648,7 +720,7 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, selected_ckpt_n
 
         ax2.set_axis_off()
         ax2.annotate(
-            f"EDPS — {pruned_pct:.1f}% pruned | Solid={len(shown_dets)} Pred Boxes, Dashed={len(window_boxes)} GT Boxes",
+            f"EDPS — {pruned_pct:.1f}% pruned | Solid={len(shown_dets)} Detected Objects (NMS Merged), Dashed={len(window_boxes)} GT Boxes",
             xy=(0.5, -0.02), xycoords="axes fraction",
             ha="center", fontsize=8, color=muted_col,
         )
@@ -836,16 +908,22 @@ def launch(share: bool = True):
     checkpoints_map = get_available_checkpoints()
     import re
     def ckpt_sort_key(name):
-        if "best" in name.lower():
-            return (0, 0)
+        folder_rank = 0 if ("proposed" in name.lower() or "edps" in name.lower()) else (1 if "baseline" in name.lower() else 2)
+        best_rank = 0 if "best" in name.lower() else 1
         nums = re.findall(r'\d+', name)
-        if nums:
-            return (1, -int(nums[0]))
-        return (2, name)
+        epoch_rank = -int(nums[0]) if nums else 0
+        return (folder_rank, best_rank, epoch_rank, name)
 
     ckpt_choices = sorted(list(checkpoints_map.keys()), key=ckpt_sort_key)
     default_ckpt = None
-    for priority in ["checkpoint_epoch_20.pt", "best_model.pt", "best_checkpoint.pt"]:
+    for priority in [
+        "[Proposed EDPS] checkpoint_epoch_20.pt",
+        "[Proposed EDPS] best_model.pt",
+        "[Baseline] checkpoint_epoch_20.pt",
+        "[Baseline] best_model.pt",
+        "checkpoint_epoch_20.pt",
+        "best_model.pt",
+    ]:
         if priority in ckpt_choices:
             default_ckpt = priority
             break
@@ -930,6 +1008,11 @@ def launch(share: bool = True):
                     label="Gate Threshold",
                     info="EDPS soft-gate cutoff (0.50 default)",
                 )
+                det_conf_slider = gr.Slider(
+                    minimum=0.15, maximum=0.85, value=0.30, step=0.05,
+                    label="Object Detection Confidence",
+                    info="NMS threshold to merge multi-patch object detections",
+                )
                 patch_size_dropdown = gr.Dropdown(
                     choices=[16, 32], value=16, label="Patch Size (px)",
                 )
@@ -955,7 +1038,7 @@ def launch(share: bool = True):
             fn=process_demo,
             inputs=[
                 rec_dropdown, dat_upload, bbox_upload, ckpt_dropdown, ckpt_upload,
-                offset_slider, window_slider, thresh_slider, patch_size_dropdown, show_scores_checkbox,
+                offset_slider, window_slider, thresh_slider, det_conf_slider, patch_size_dropdown, show_scores_checkbox,
             ],
             outputs=[plot_out, kpi_out, table_out, status_out],
         )
