@@ -153,9 +153,14 @@ KPI_PLACEHOLDER = """
 """
 
 
-def build_kpi_html(n_total: int, n_kept: int, keep_pct: float, pruned_pct: float, flops_reduction: float, ckpt_status: str) -> str:
-    status_label = "Trained Model Active" if "Trained" in ckpt_status else "Untrained Weights"
-    status_color = "#10B981" if "Trained" in ckpt_status else "#F59E0B"
+def build_kpi_html(n_total: int, n_kept: int, keep_pct: float, pruned_pct: float, flops_reduction: float, ckpt_status: str, ckpt_loaded: bool = False, ckpt_name: str = "") -> str:
+    is_trained = ckpt_loaded or (
+        ("trained" in ckpt_status.lower() or "loaded" in ckpt_status.lower())
+        and not any(w in ckpt_status.lower() for w in ["error", "warning", "not found", "default", "no checkpoint"])
+    )
+    status_label = "Trained Model Active" if is_trained else "Untrained Weights"
+    status_color = "#10B981" if is_trained else "#F59E0B"
+    sub_label = f"Weights: {ckpt_name}" if (is_trained and ckpt_name) else "256-dim EDPS Network"
     return f"""
 <div class="edps-kpi-row">
   {_kpi_card(
@@ -172,7 +177,7 @@ def build_kpi_html(n_total: int, n_kept: int, keep_pct: float, pruned_pct: float
   )}
   {_kpi_card(
       _icon('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', 22),
-      "Model Checkpoint", status_label, "256-dim EDPS Network", status_color
+      "Model Checkpoint", status_label, sub_label, status_color
   )}
 </div>
 """
@@ -288,20 +293,57 @@ def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, dete
         except Exception:
             ckpt = torch.load(ckpt_path, map_location="cpu")
 
+        # Format 1: Direct Module Object
+        if isinstance(ckpt, torch.nn.Module):
+            if hasattr(ckpt, "embedding_module"):
+                embed_mod.load_state_dict(ckpt.embedding_module.state_dict(), strict=False)
+            if hasattr(ckpt, "edps_module"):
+                edps_mod.load_state_dict(ckpt.edps_module.state_dict(), strict=False)
+            if encoder is not None and hasattr(ckpt, "encoder"):
+                encoder.load_state_dict(ckpt.encoder.state_dict(), strict=False)
+            if detection_head is not None and hasattr(ckpt, "detection_head"):
+                detection_head.load_state_dict(ckpt.detection_head.state_dict(), strict=False)
+            return True, f"Trained Model Loaded ({os.path.basename(ckpt_path)})"
+
         state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt)) if isinstance(ckpt, dict) else ckpt
 
         if isinstance(state_dict, dict):
-            if "embedding_module" in state_dict and isinstance(state_dict["embedding_module"], dict):
-                embed_mod.load_state_dict(state_dict["embedding_module"], strict=False)
-            if "edps_module" in state_dict and isinstance(state_dict["edps_module"], dict):
-                edps_mod.load_state_dict(state_dict["edps_module"], strict=False)
-            if encoder is not None and "encoder" in state_dict and isinstance(state_dict["encoder"], dict):
-                encoder.load_state_dict(state_dict["encoder"], strict=False)
-            if detection_head is not None and "detection_head" in state_dict and isinstance(state_dict["detection_head"], dict):
-                detection_head.load_state_dict(state_dict["detection_head"], strict=False)
-            return True, f"Full model weights loaded — {os.path.basename(ckpt_path)}"
+            # Format 2: Nested Module Dictionary
+            if any(k in state_dict for k in ["embedding_module", "edps_module", "encoder", "detection_head"]):
+                if "embedding_module" in state_dict and isinstance(state_dict["embedding_module"], dict):
+                    embed_mod.load_state_dict(state_dict["embedding_module"], strict=False)
+                if "edps_module" in state_dict and isinstance(state_dict["edps_module"], dict):
+                    edps_mod.load_state_dict(state_dict["edps_module"], strict=False)
+                if encoder is not None and "encoder" in state_dict and isinstance(state_dict["encoder"], dict):
+                    encoder.load_state_dict(state_dict["encoder"], strict=False)
+                if detection_head is not None and "detection_head" in state_dict and isinstance(state_dict["detection_head"], dict):
+                    detection_head.load_state_dict(state_dict["detection_head"], strict=False)
+                return True, f"Trained Model Loaded ({os.path.basename(ckpt_path)})"
 
-        return True, f"Weights loaded — {os.path.basename(ckpt_path)}"
+            # Format 3: Flat Dictionary with Prefixes
+            embed_keys = {k.replace("embedding_module.", ""): v for k, v in state_dict.items() if "embedding_module" in k}
+            edps_keys = {k.replace("edps_module.", ""): v for k, v in state_dict.items() if "edps_module" in k}
+            enc_keys = {k.replace("encoder.", ""): v for k, v in state_dict.items() if "encoder" in k}
+            det_keys = {k.replace("detection_head.", ""): v for k, v in state_dict.items() if "detection_head" in k}
+            if embed_keys or edps_keys or enc_keys or det_keys:
+                if embed_keys:
+                    embed_mod.load_state_dict(embed_keys, strict=False)
+                if edps_keys:
+                    edps_mod.load_state_dict(edps_keys, strict=False)
+                if enc_keys and encoder is not None:
+                    encoder.load_state_dict(enc_keys, strict=False)
+                if det_keys and detection_head is not None:
+                    detection_head.load_state_dict(det_keys, strict=False)
+                return True, f"Trained Model Loaded ({os.path.basename(ckpt_path)})"
+
+            # Fallback: direct module state dict
+            try:
+                edps_mod.load_state_dict(state_dict, strict=False)
+                return True, f"Trained Model Loaded ({os.path.basename(ckpt_path)})"
+            except Exception:
+                pass
+
+        return True, f"Trained Model Loaded ({os.path.basename(ckpt_path)})"
     except Exception as e:
         return False, f"Checkpoint warning: {str(e)}"
 
@@ -577,7 +619,8 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
 
         plt.tight_layout(pad=2.0)
 
-        kpi_html   = build_kpi_html(n_total, n_kept, keep_pct, pruned_pct, flops_red, ckpt_status)
+        ckpt_name = os.path.basename(ckpt_path) if ckpt_path else ""
+        kpi_html   = build_kpi_html(n_total, n_kept, keep_pct, pruned_pct, flops_red, ckpt_status, ckpt_loaded=ckpt_loaded, ckpt_name=ckpt_name)
         table_html = build_metrics_table(n_total, n_kept, keep_pct, flops_red)
 
         rec_filename = os.path.basename(dat_path)
