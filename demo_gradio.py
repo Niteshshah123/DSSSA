@@ -282,6 +282,23 @@ def get_available_recordings():
     return recordings
 
 
+def get_available_checkpoints():
+    candidates = ["/content", "/content/drive/MyDrive", "/content/m10_checkpoints", current_dir, os.getcwd()]
+    checkpoints = {}
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            for root, _, files in os.walk(candidate):
+                if ".git" in root or "__pycache__" in root or "site-packages" in root:
+                    continue
+                for f in files:
+                    if f.endswith(".pt") or f.endswith(".pth") or f.endswith(".ckpt"):
+                        full_path = os.path.join(root, f)
+                        display_name = f
+                        if display_name not in checkpoints:
+                            checkpoints[display_name] = full_path
+    return checkpoints
+
+
 def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, detection_head=None):
     if not ckpt_path:
         return False, "No checkpoint selected — using default weights"
@@ -348,7 +365,7 @@ def load_universal_checkpoint(ckpt_path, embed_mod, edps_mod, encoder=None, dete
         return False, f"Checkpoint warning: {str(e)}"
 
 
-def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, offset_ms, window_ms, gate_thresh, patch_size, show_scores):
+def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, selected_ckpt_name, uploaded_ckpt, offset_ms, window_ms, gate_thresh, patch_size, show_scores):
     try:
         dat_path = resolve_file_path(uploaded_dat)
         if not dat_path and selected_rec_name:
@@ -409,12 +426,20 @@ def process_demo(selected_rec_name, uploaded_dat, uploaded_bbox, uploaded_ckpt, 
         )
         grid_tensor = torch.from_numpy(grid_np)
 
+        # 1. Custom uploaded file through browser (takes priority if user dropped a file)
         ckpt_path = resolve_file_path(uploaded_ckpt)
+        # 2. Selected from Colab disk dropdown
+        if not ckpt_path and selected_ckpt_name:
+            ckpt_map = get_available_checkpoints()
+            ckpt_path = ckpt_map.get(selected_ckpt_name)
+        # 3. Fallback auto-search across standard Colab / local directories
         if not ckpt_path:
             for cand in [
+                "/content/checkpoint_epoch_20.pt",
                 "/content/best_model.pt",
                 "/content/best_checkpoint.pt",
                 "/content/m10_checkpoints/checkpoints/best_checkpoint.pt",
+                os.path.join(current_dir, "checkpoint_epoch_20.pt"),
                 os.path.join(current_dir, "best_model.pt"),
                 os.path.join(current_dir, "best_checkpoint.pt"),
             ]:
@@ -794,8 +819,18 @@ input[type=range] { accent-color: var(--cyan); }
 
 
 def launch(share: bool = True):
-    recordings_map = get_available_recordings()
-    rec_choices    = list(recordings_map.keys())
+    recordings_map  = get_available_recordings()
+    rec_choices     = list(recordings_map.keys())
+
+    checkpoints_map = get_available_checkpoints()
+    ckpt_choices    = list(checkpoints_map.keys())
+    default_ckpt    = None
+    for priority in ["checkpoint_epoch_20.pt", "best_model.pt", "best_checkpoint.pt"]:
+        if priority in ckpt_choices:
+            default_ckpt = priority
+            break
+    if not default_ckpt and ckpt_choices:
+        default_ckpt = ckpt_choices[0]
 
     with gr.Blocks(
         title="EDPS — Token Selection Analysis",
@@ -824,9 +859,16 @@ def launch(share: bool = True):
                         info="Prophesee Gen1 stream on local disk",
                     )
                 with gr.Column(scale=4):
-                    bbox_upload = gr.File(label="Bounding Box Labels (.npy)", type="filepath", file_types=[".npy"])
+                    ckpt_dropdown = gr.Dropdown(
+                        choices=ckpt_choices,
+                        value=default_ckpt,
+                        label="Model Weights (.pt)",
+                        info="Select checkpoint from Colab disk",
+                    )
+                    with gr.Accordion("Upload Custom Checkpoint", open=False):
+                        ckpt_upload = gr.File(label="Upload .pt Weights", type="filepath", file_types=[".pt"])
                 with gr.Column(scale=4):
-                    ckpt_upload = gr.File(label="Model Weights (.pt)", type="filepath", file_types=[".pt"])
+                    bbox_upload = gr.File(label="Bounding Box Labels (.npy)", type="filepath", file_types=[".npy"])
 
         # Dummy hidden upload for process_demo function signature compatibility
         dat_upload = gr.State(value=None)
@@ -892,7 +934,7 @@ def launch(share: bool = True):
         run_btn.click(
             fn=process_demo,
             inputs=[
-                rec_dropdown, dat_upload, bbox_upload, ckpt_upload,
+                rec_dropdown, dat_upload, bbox_upload, ckpt_dropdown, ckpt_upload,
                 offset_slider, window_slider, thresh_slider, patch_size_dropdown, show_scores_checkbox,
             ],
             outputs=[plot_out, kpi_out, table_out, status_out],
